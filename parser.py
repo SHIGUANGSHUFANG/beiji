@@ -29,6 +29,7 @@ parser.py
 
 import re
 import random
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,14 @@ try:
     from docx import Document
 except ImportError:
     Document = None
+
+# ─────────────────────────────────────────────
+# DeepSeek API 配置
+# ─────────────────────────────────────────────
+# 请在此处填入你的 DeepSeek API Key
+DEEPSEEK_API_KEY = "sk-78e837829f1b4b5f90d9d375dba2ecd4"   # ← 在这里填入你的 DeepSeek API Key
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_MODEL = "deepseek-chat"
 
 
 # ─────────────────────────────────────────────
@@ -544,24 +553,176 @@ def _parse_question_abcd(paragraphs: list, start: int) -> tuple:
 
 
 # ─────────────────────────────────────────────
-# 生成干扰项
+# DeepSeek API 调用
 # ─────────────────────────────────────────────
 
-def generate_distractors(items: list[dict], target_blanks: list[str], n: int = 3) -> list[str]:
+def _call_deepseek_api(prompt: str, system_msg: str = "你是一位初中学科教育专家。") -> str:
+    """
+    调用 DeepSeek API 生成内容。
+    如果 API Key 未配置，返回空字符串。
+    """
+    if not DEEPSEEK_API_KEY:
+        return ""
+
+    try:
+        import urllib.request
+        import urllib.error
+
+        payload = json.dumps({
+            "model": DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.7,
+            "max_tokens": 500,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            DEEPSEEK_API_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            return result["choices"][0]["message"]["content"].strip()
+
+    except Exception as e:
+        print(f"[DeepSeek API 调用失败] {e}")
+        return ""
+
+
+def _generate_distractors_via_api(target_blanks: list[str], context: str, n: int) -> list[str]:
+    """
+    通过 DeepSeek API 生成干扰项。
+    """
+    blanks_str = "、".join(f"「{b}」" for b in target_blanks)
+    prompt = (
+        f"在以下知识语境中，填空处应填的词是：{blanks_str}。\n"
+        f"知识语境：{context}\n\n"
+        f"请生成 {n} 个干扰项（即与正确答案容易混淆但错误的词或短语），"
+        f"要求：\n"
+        f"1. 与正确答案在字数、学科领域上相近，容易造成混淆\n"
+        f"2. 不能与正确答案相同或过于相似\n"
+        f"3. 不能互相重复\n\n"
+        f"请直接用 JSON 数组格式输出，例如：[\"干扰项1\", \"干扰项2\", \"干扰项3\"]\n"
+        f"只输出数组，不要其他内容。"
+    )
+
+    response = _call_deepseek_api(prompt)
+    if not response:
+        return []
+
+    # 尝试解析 JSON
+    try:
+        # 去除可能的 markdown 代码块标记
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r'^```\w*\n?', '', cleaned)
+            cleaned = re.sub(r'\n?```$', '', cleaned)
+            cleaned = cleaned.strip()
+
+        result = json.loads(cleaned)
+        if isinstance(result, list):
+            # 过滤掉与正确答案相同的
+            return [r for r in result if r not in target_blanks][:n]
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 如果 JSON 解析失败，尝试按行拆分
+    lines = [l.strip().strip('"').strip("'") for l in response.split("\n") if l.strip()]
+    return [l for l in lines if l and l not in target_blanks][:n]
+
+
+# ─────────────────────────────────────────────
+# 生成干扰项（主函数）
+# ─────────────────────────────────────────────
+
+def generate_distractors(items, target_blanks: list[str], n: int = 3) -> list[str]:
     """
     为填空题生成干扰项。
-    从所有其他知识条目的 blanks 中随机选取，并去重。
+
+    策略：
+    1. 优先从同文档其他知识条目的 blanks 中随机选取（零延迟）
+    2. 若文档内干扰词不足，且 DeepSeek API Key 已配置，则调用 AI 生成
+    3. 若都不够，用占位干扰项填充
+
+    参数：
+        items: 解析后的全部条目列表（list[dict]）
+        target_blanks: 当前填空的正确答案列表
+        n: 需要的干扰项数量
     """
+    # ── 防御性检查 ──
+    if not items:
+        items = []
+    if not isinstance(items, (list, tuple)):
+        items = list(items) if items else []
+    if not target_blanks:
+        target_blanks = []
+    if n <= 0:
+        return []
+
+    # ── 第一步：从文档内其他知识条目的填空词中抽取 ──
     pool = set()
     for item in items:
-        if item['type'] == 'knowledge':
+        if not isinstance(item, dict):
+            continue
+        if item.get('type') == 'knowledge':
             for b in item.get('blanks', []):
                 if b and b not in target_blanks:
                     pool.add(b)
 
-    pool = list(pool)
-    random.shuffle(pool)
-    return pool[:n]
+    pool_list = list(pool)
+    random.shuffle(pool_list)
+
+    # 如果文档内干扰词足够，直接返回
+    if len(pool_list) >= n:
+        return pool_list[:n]
+
+    # ── 第二步：文档内不够，尝试调用 DeepSeek API ──
+    result = pool_list[:]  # 先拿已有的
+
+    need_from_api = n - len(result)
+
+    if DEEPSEEK_API_KEY and need_from_api > 0:
+        # 构建上下文：取当前知识条目的内容
+        context = ""
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get('type') == 'knowledge' and item.get('blanks'):
+                # 找到包含当前 target_blanks 的条目
+                if any(b in item.get('blanks', []) for b in target_blanks):
+                    context = item.get('content', '') or item.get('template', '')
+                    break
+
+        api_distractors = _generate_distractors_via_api(target_blanks, context, need_from_api + 2)
+        for d in api_distractors:
+            if d not in result and d not in target_blanks:
+                result.append(d)
+            if len(result) >= n:
+                break
+
+    # ── 第三步：还不够，用通用干扰项填充 ──
+    if len(result) < n:
+        generic_fillers = [
+            "无", "不确定", "以上都不对", "无法判断",
+            "相同", "不同", "增加", "减少",
+            "变大", "变小", "升高", "降低",
+        ]
+        random.shuffle(generic_fillers)
+        for g in generic_fillers:
+            if g not in result and g not in target_blanks:
+                result.append(g)
+            if len(result) >= n:
+                break
+
+    return result[:n]
 
 
 # ─────────────────────────────────────────────
