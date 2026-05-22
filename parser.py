@@ -658,10 +658,18 @@ def generate_distractors(items, target_blanks: list[str], n: int = 3) -> list[st
         n: 需要的干扰项数量
     """
     # ── 防御性检查 ──
+    if isinstance(items, (list, tuple)):
+        pass  # 已经是可迭代类型
+    elif hasattr(items, '__iter__'):
+        # 可能是 dict_keys / dict_values / SessionStateProxy 等，安全转换
+        try:
+            items = list(items)
+        except (TypeError, KeyError):
+            items = []
+    else:
+        items = []
     if not items:
         items = []
-    if not isinstance(items, (list, tuple)):
-        items = list(items) if items else []
     if not target_blanks:
         target_blanks = []
     if n <= 0:
