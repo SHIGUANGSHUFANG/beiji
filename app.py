@@ -455,7 +455,9 @@ elif st.session_state.step == 2:
     answers = st.session_state.fill_answers
 
     # 生成选项池（正确词 + 干扰词，打乱）
-    items_safe = st.session_state.items if st.session_state.items else []
+    # 确保传入的是普通 list，避免 Streamlit SessionState 代理对象导致 TypeError
+    items_raw = st.session_state.get("items", [])
+    items_safe = list(items_raw) if isinstance(items_raw, (list, tuple)) else []
     distractors = generate_distractors(items_safe, blanks, n=max(3, len(blanks)))
     option_pool = blanks + distractors
     random.seed(f"fill_{idx}_{len(blanks)}")   # 固定打乱顺序（同一题不变）
