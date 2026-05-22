@@ -13,7 +13,7 @@ import random
 import re
 import streamlit as st
 
-from parser import parse_docx, generate_distractors, DEMO_ITEMS
+from parser import parse_docx, generate_distractors, DEMO_ITEMS, DEEPSEEK_API_KEY
 
 # ──────────────────────────────────────────────
 # 页面基础配置
@@ -294,6 +294,23 @@ with st.sidebar:
                 st.rerun()
 
     st.markdown("---")
+
+    # DeepSeek API 配置
+    import parser as _parser
+    st.markdown("#### 🤖 AI 干扰项生成")
+    current_key = _parser.DEEPSEEK_API_KEY
+    api_key_input = st.text_input(
+        "DeepSeek API Key",
+        value=current_key,
+        type="password",
+        help="填入 DeepSeek API Key 后，填空练习的干扰词将由 AI 智能生成，\n否则仅从文档内已有填空词中抽取。",
+        key="deepseek_api_key_input",
+    )
+    if api_key_input != current_key:
+        _parser.DEEPSEEK_API_KEY = api_key_input
+        st.caption("✅ API Key 已更新" if api_key_input else "⚠️ 未配置 API Key，使用文档内抽取模式")
+
+    st.markdown("---")
     st.markdown(
         "<small>📌 格式说明：Word文档中<br>"
         "• <b>知识段落</b>：普通正文<br>"
@@ -438,7 +455,8 @@ elif st.session_state.step == 2:
     answers = st.session_state.fill_answers
 
     # 生成选项池（正确词 + 干扰词，打乱）
-    distractors = generate_distractors(st.session_state.items, blanks, n=max(3, len(blanks)))
+    items_safe = st.session_state.items if st.session_state.items else []
+    distractors = generate_distractors(items_safe, blanks, n=max(3, len(blanks)))
     option_pool = blanks + distractors
     random.seed(f"fill_{idx}_{len(blanks)}")   # 固定打乱顺序（同一题不变）
     random.shuffle(option_pool)
